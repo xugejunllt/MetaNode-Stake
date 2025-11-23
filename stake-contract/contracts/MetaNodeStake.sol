@@ -427,8 +427,8 @@ contract MetaNodeStake is
      * getMultiplier(pool_.lastRewardBlock, block.number).tryMul(pool_.poolWeight);
      */
     function getMultiplier(
-        uint256 _from,
-        uint256 _to
+        uint256 _from, //从哪个块开始计算奖励 multiplier
+        uint256 _to //到哪个块结束计算奖励 multiplier
     ) public view returns (uint256 multiplier) {
         require(_from <= _to, "invalid block");
         if (_from < startBlock) {
@@ -439,7 +439,7 @@ contract MetaNodeStake is
         }
         require(_from <= _to, "end block must be greater than start block");
         bool success;
-        (success, multiplier) = (_to - _from).tryMul(MetaNodePerBlock);
+        (success, multiplier) = (_to - _from).tryMul(MetaNodePerBlock); //MetaNodePerBlock : 每个块奖励的 MetaNode 数量
         require(success, "multiplier overflow");
     }
 
@@ -456,34 +456,55 @@ contract MetaNodeStake is
     /**
      * @notice Get pending MetaNode amount of user by block number in pool
      */
+    /**
+     * @notice 根据指定区块号计算用户的待领取MetaNode代币奖励
+     * @param _pid 质押池ID
+     * @param _user 用户地址
+     * @param _blockNumber 指定的区块号
+     * @return 待领取的MetaNode代币数量
+     * @dev 视图函数，用于在不修改链上状态的情况下查询用户在特定区块的奖励
+     * 使用checkPid修饰器验证质押池ID的有效性
+     */
     function pendingMetaNodeByBlockNumber(
         uint256 _pid,
         address _user,
         uint256 _blockNumber
     ) public view checkPid(_pid) returns (uint256) {
+        // 获取质押池和用户的存储引用
         Pool storage pool_ = pool[_pid];
         User storage user_ = user[_pid][_user];
+        
+        // 初始化变量：累积的每个质押代币对应的MetaNode奖励和质押池总供应量
         uint256 accMetaNodePerST = pool_.accMetaNodePerST;
         uint256 stSupply = pool_.stTokenAmount;
 
+        // 如果指定区块号大于最后奖励计算区块且质押池中有代币
         if (_blockNumber > pool_.lastRewardBlock && stSupply != 0) {
+            // 计算区块范围内的奖励乘数
             uint256 multiplier = getMultiplier(
                 pool_.lastRewardBlock,
                 _blockNumber
             );
+            
+            // 计算该质押池应得的MetaNode奖励（基于池权重）
             uint256 MetaNodeForPool = (multiplier * pool_.poolWeight) /
                 totalPoolWeight;
+            
+            // 更新累积的每个质押代币对应的MetaNode奖励
+            // 使用1 ether作为精度调整因子，确保计算精度
             accMetaNodePerST =
                 accMetaNodePerST +
                 (MetaNodeForPool * (1 ether)) /
-                stSupply;
+                stSupply; // stSupply : 池中的质押代币总数量
         }
 
+        // 计算并返回用户的待领取奖励
+        // 公式：(用户质押量 × 累积奖励率) ÷ 精度因子 - 已领取奖励 + 待处理奖励
         return
             (user_.stAmount * accMetaNodePerST) /
-            (1 ether) -
-            user_.finishedMetaNode +
-            user_.pendingMetaNode;
+            (1 ether) - // 移除精度调整因子
+            user_.finishedMetaNode + // 减去已计算过的奖励
+            user_.pendingMetaNode; // 加上之前累积但未处理的待领取奖励
     }
 
     /**
@@ -525,32 +546,49 @@ contract MetaNodeStake is
     /**
      * @notice Update reward variables of the given pool to be up-to-date.
      */
+    /**
+     * @notice 更新指定质押池的奖励状态
+     * @param _pid 质押池ID
+     * @dev 计算从上次奖励计算到当前区块之间应分配的MetaNode奖励
+     * 更新池的累积奖励率(accMetaNodePerST)和最后奖励区块(lastRewardBlock)
+     * 使用checkPid修饰器验证质押池ID的有效性
+     */
     function updatePool(uint256 _pid) public checkPid(_pid) {
+        // 获取质押池的存储引用
         Pool storage pool_ = pool[_pid];
 
+        // 如果当前区块不大于最后奖励计算区块，则无需更新
         if (block.number <= pool_.lastRewardBlock) {
             return;
         }
 
+        // 计算从上次奖励区块到当前区块的奖励乘数，并乘以池权重
         (bool success1, uint256 totalMetaNode) = getMultiplier(
             pool_.lastRewardBlock,
             block.number
         ).tryMul(pool_.poolWeight);
         require(success1, "overflow");
 
+        // 根据总权重分配奖励，计算该池应得的MetaNode总量
         (success1, totalMetaNode) = totalMetaNode.tryDiv(totalPoolWeight);
         require(success1, "overflow");
 
+        // 获取池中的质押代币总供应量
         uint256 stSupply = pool_.stTokenAmount;
+        
+        // 只有当池中存在质押代币时才分配奖励
         if (stSupply > 0) {
+            // 乘以1 ether调整精度，避免小数计算问题
             (bool success2, uint256 totalMetaNode_) = totalMetaNode.tryMul(
                 1 ether
             );
             require(success2, "overflow");
 
+            // 计算每单位质押代币应得的奖励（已调整精度）
             (success2, totalMetaNode_) = totalMetaNode_.tryDiv(stSupply);
             require(success2, "overflow");
 
+            // 将新计算的奖励率累加到池的累积奖励率中
             (bool success3, uint256 accMetaNodePerST) = pool_
                 .accMetaNodePerST
                 .tryAdd(totalMetaNode_);
@@ -558,8 +596,10 @@ contract MetaNodeStake is
             pool_.accMetaNodePerST = accMetaNodePerST;
         }
 
+        // 更新池的最后奖励计算区块为当前区块
         pool_.lastRewardBlock = block.number;
 
+        // 发出事件记录更新操作
         emit UpdatePool(_pid, pool_.lastRewardBlock, totalMetaNode);
     }
 
@@ -627,27 +667,46 @@ contract MetaNodeStake is
      * @param _pid       Id of the pool to be withdrawn from
      * @param _amount    amount of staking tokens to be withdrawn
      */
+    /**
+     * @notice 用户解除质押操作函数
+     * @param _pid 质押池ID
+     * @param _amount 要解除质押的代币数量
+     * @dev 执行解除质押操作，包括计算奖励、创建解锁请求和更新状态
+     * 修饰器说明：
+     * - whenNotPaused: 合约未暂停时才可操作
+     * - checkPid: 验证质押池ID的有效性
+     * - whenNotWithdrawPaused: 提款功能未暂停时才可操作
+     */
     function unstake(
         uint256 _pid,
         uint256 _amount
     ) public whenNotPaused checkPid(_pid) whenNotWithdrawPaused {
+        // 获取质押池和用户的存储引用
         Pool storage pool_ = pool[_pid];
         User storage user_ = user[_pid][msg.sender];
 
+        // 验证用户是否有足够的质押代币余额
         require(user_.stAmount >= _amount, "Not enough staking token balance");
 
+        // 更新质押池状态，计算最新的每单位质押代币奖励
         updatePool(_pid);
 
+        // 计算用户当前待领取的MetaNode奖励
         uint256 pendingMetaNode_ = (user_.stAmount * pool_.accMetaNodePerST) /
             (1 ether) -
-            user_.finishedMetaNode;
+            user_.finishedMetaNode; //新产生的待领取奖励
 
+        // 如果有待领取奖励，则累加到用户的待领取奖励中
         if (pendingMetaNode_ > 0) {
             user_.pendingMetaNode = user_.pendingMetaNode + pendingMetaNode_;
         }
 
+        // 如果解除质押数量大于0，执行解除质押操作
         if (_amount > 0) {
+            // 减少用户的质押数量
             user_.stAmount = user_.stAmount - _amount;
+            
+            // 创建解除质押请求，设置解锁时间（当前区块+锁定期限）
             user_.requests.push(
                 UnstakeRequest({
                     amount: _amount,
@@ -656,11 +715,15 @@ contract MetaNodeStake is
             );
         }
 
+        // 更新质押池中的总质押代币数量
         pool_.stTokenAmount = pool_.stTokenAmount - _amount;
+        
+        // 更新用户的已领取奖励基准线，基于剩余的质押数量
         user_.finishedMetaNode =
             (user_.stAmount * pool_.accMetaNodePerST) /
             (1 ether);
 
+        // 发出解除质押请求事件
         emit RequestUnstake(msg.sender, _pid, _amount);
     }
 
@@ -753,9 +816,9 @@ contract MetaNodeStake is
 
         if (user_.stAmount > 0) {
             // uint256 accST = user_.stAmount.mulDiv(pool_.accMetaNodePerST, 1 ether);
-            (bool success1, uint256 accST) = user_.stAmount.tryMul(
-                pool_.accMetaNodePerST
-            );
+            (bool success1, uint256 accST) = user_.stAmount.tryMul( //user_.stAmount : 用户在该质押池中的质押数量
+                pool_.accMetaNodePerST //pool_.accMetaNodePerST : 池中每单位质押代币累积的 MetaNode 奖励数量
+            ); //accST : 计算结果，表示用户到目前为止应得的总奖励数量
             require(success1, "user stAmount mul accMetaNodePerST overflow");
             (success1, accST) = accST.tryDiv(1 ether);
             require(success1, "accST div 1 ether overflow");
